@@ -2,6 +2,8 @@
 
 A multi-tenant SaaS backend and admin UI: PostgreSQL Row-Level Security for organization isolation, RBAC, signed webhooks, a background job queue, and an AI-assisted feature. FastAPI, Next.js, Postgres.
 
+**Live:** [vesta.sonofnos.com](https://vesta.sonofnos.com) (frontend, Vercel) · API on Render · Postgres on Neon. Sign up with any organisation slug to get your own isolated tenant; all data is synthetic.
+
 Themed on healthcare intake records without claiming any clinical data model or compliance certification. The problem being demonstrated, an org's data must never be visible to another org even when application code has a bug, is the same for any SaaS product handling sensitive records, and it's the hardest security boundary to get right.
 
 ## The tenant-isolation story
@@ -21,6 +23,8 @@ CREATE POLICY tenant_isolation ON records
 **The bug this repo actually had, and the fix.** The first working version of this schema passed every test — until the tests ran against a database role that was a Postgres superuser. Superusers, and any role with `BYPASSRLS`, ignore RLS unconditionally, and `FORCE ROW LEVEL SECURITY` only binds the *table owner* against its own policies — it does nothing against a superuser. The official `postgres` Docker image's default user is a superuser. So the very first version of this project had textbook-correct RLS policies that did nothing at all, and every test that should have proven isolation passed by accident, because the role running them could see everything regardless.
 
 The fix is `sql/000_app_role.sql`: a dedicated `tenant_vault_app` role, `NOSUPERUSER NOBYPASSRLS`, that owns no tables and has exactly the `SELECT`/`INSERT`/`UPDATE`/`DELETE` grants it needs (`sql/002_grants.sql`). Migrations run as the schema owner; the application never does. `tests/test_tenant_isolation.py::test_raw_query_with_no_where_clause_still_only_sees_its_own_org` is the test that would have caught this from day one, had it been run against the right role — it issues a bare `SELECT * FROM records` with zero filtering, inside one org's transaction context, and asserts the other org's row is not there.
+
+**The same bug, again, on managed Postgres.** On Neon, the default owner role (`neondb_owner`) is not a superuser but *does* have `BYPASSRLS`. Point `DATABASE_URL` at the connection string Neon hands you by default and every policy above is silently off. So the app now refuses to start if its own role is a superuser or has `BYPASSRLS` (`assert_role_cannot_bypass_rls` in `app/db/session.py`, run at startup, tested in `tests/test_startup_guard.py`). The deployed API runs as `tenant_vault_app`, whose password comes from `APP_DB_PASSWORD` at migration time rather than from the repo.
 
 **Login without an RLS bypass.** Logging in needs to find a user by email before an org context exists — the same problem as the bug above, in miniature. The obvious fix, a global "look up any user by email" query, is exactly the kind of query that has to run outside RLS and would be the one deliberate hole in an otherwise absolute boundary. Instead, login and signup take an organization slug (`POST /auth/login {"organization_slug", "email", "password"}`), the same shape as GitHub, Slack, or Linear's "which workspace" step. The only query in this codebase against a non-RLS-protected table is resolving that slug to an org id; every subsequent query, including the user lookup, runs inside that org's transaction context.
 
