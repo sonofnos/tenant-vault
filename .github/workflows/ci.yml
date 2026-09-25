@@ -52,3 +52,12 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -t tenant-vault-api:ci backend
+      - name: Build frontend image
+        run: docker build -t tenant-vault-web:ci frontend
