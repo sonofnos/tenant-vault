@@ -47,3 +47,25 @@ async def tenant_session(org_id: UUID | None) -> AsyncIterator[AsyncSession]:
         if org_id is not None:
             await session.execute(text("SELECT set_config('app.current_org_id', :org_id, true)"), {"org_id": str(org_id)})
         yield session
+
+
+class UnsafeDatabaseRoleError(RuntimeError):
+    pass
+
+
+async def assert_role_cannot_bypass_rls() -> None:
+    """
+    Refuses to start the app if its own database role is a superuser or has
+    BYPASSRLS: either one silently switches off every tenant-isolation policy.
+    This is not hypothetical -- the default owner role on managed Postgres
+    (Neon's neondb_owner, for one) has BYPASSRLS, so pointing DATABASE_URL at
+    the owner instead of tenant_vault_app would pass every request and leak
+    every row across organisations.
+    """
+    async with SessionLocal() as session:
+        row = (await session.execute(text("SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user"))).one()
+    if row.rolsuper or row.rolbypassrls:
+        raise UnsafeDatabaseRoleError(
+            f"DATABASE_URL connects as '{row.current_user}', which can bypass row-level security. "
+            "Connect as tenant_vault_app instead."
+        )
